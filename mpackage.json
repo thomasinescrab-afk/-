@@ -1,0 +1,140 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const bodyParser = require('body-parser');
+const multer = require('multer');
+const TelegramBot = require('node-telegram-bot-api');
+const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto'); // مكتبة التشفير وفك التشفير
+
+// --- الإعدادات العامة ---
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: { origin: "*" } // السماح بالاتصالات من أي مصدر
+});
+
+const PORT = process.env.PORT || 3000;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
+
+// مفتاح التشفير (يجب أن يكون 32 حرفاً)
+const ENCRYPTION_KEY = Buffer.from('12345678901234567890123456789012'); 
+const IV_LENGTH = 16; // طول متجه التهيئة
+
+// --- دوال التشفير وفك التشفير ---
+
+/**
+ * دالة لتشفير النصوص
+ * @param {string} text النص المراد تشفيره
+ */
+function encrypt(text) {
+    let iv = crypto.randomBytes(IV_LENGTH);
+    let cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+    let encrypted = cipher.update(text);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
+
+/**
+ * دالة لفك تشفير النصوص
+ * @param {string} text النص المشفر
+ */
+function decrypt(text) {
+    try {
+        let textParts = text.split(':');
+        let iv = Buffer.from(textParts.shift(), 'hex');
+        let encryptedText = Buffer.from(textParts.join(':'), 'hex');
+        let decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+        let decrypted = decipher.update(encryptedText);
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
+        return decrypted.toString();
+    } catch (error) {
+        return "خطأ في فك التشفير: البيانات غير صالحة";
+    }
+}
+
+// --- الوسائط (Middleware) ---
+app.use(bodyParser.json());
+app.use(express.static('public'));
+
+// --- إعداد رفع الملفات ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, 'uploads/'),
+    filename: (req, file, cb) => cb(null, `${uuidv4()}-${file.originalname}`)
+});
+const upload = multer({ storage: storage });
+
+// --- إعداد بوت التلجرام ---
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+bot.on('message', (msg) => {
+    const chatId = msg.chat.id;
+    const originalText = msg.text || "";
+
+    // مثال: إذا أرسل المستخدم نصاً مشفراً، نحاول فك تشفيره
+    let responseText;
+    if (originalText.includes(':')) {
+        const decrypted = decrypt(originalText);
+        responseText = `تم فك التشفير: ${decrypted}`;
+    } else {
+        responseText = `رسالة مستلمة: ${originalText}`;
+    }
+
+    bot.sendMessage(chatId, responseText);
+    
+    // إرسال البيانات إلى المتصفح عبر Socket.io
+    io.emit('new_message', {
+        from: 'Telegram',
+        content: originalText,
+        time: new Date().toLocaleTimeString('ar-EG')
+    });
+});
+
+// --- المسارات (Routes) ---
+app.get('/', (req, res) => {
+    res.send('<h1>خادم رينبو يعمل بنجاح 🌈</h1>');
+});
+
+// مسار تجريبي لتشفير البيانات
+app.post('/api/encrypt', (req, res) => {
+    const { data } = req.body;
+    if (!data) return res.status(400).json({ error: 'لا توجد بيانات' });
+    res.json({ encrypted: encrypt(data) });
+});
+
+// مسار لرفع الملفات
+app.post('/api/upload', upload.single('file'), (req, res) => {
+    res.json({ 
+        success: true, 
+        fileId: uuidv4(),
+        path: req.file.path 
+    });
+});
+
+// --- اتصالات Socket.io ---
+io.on('connection', (socket) => {
+    console.log('مستخدم جديد متصل');
+
+    socket.on('send_secure', (data) => {
+        // فك تشفير البيانات القادمة من العميل إذا كانت مشفرة
+        const decryptedData = decrypt(data);
+        console.log('بيانات مستلمة بعد فك التشفير:', decryptedData);
+        
+        // إعادة التوجيه للجميع
+        io.emit('broadcast', { msg: decryptedData });
+    });
+
+    socket.on('disconnect', () => {
+        console.log('انقطع اتصال المستخدم');
+    });
+});
+
+// --- تشغيل الخادم ---
+server.listen(PORT, () => {
+    console.log(`=========================================`);
+    console.log(`🚀 الخادم يعمل على المنفذ: ${PORT}`);
+    console.log(`🔐 ميزة فك التشفير AES-256 جاهزة`);
+    console.log(`🤖 بوت التلجرام في حالة استماع...`);
+    console.log(`=========================================`);
+});
+
